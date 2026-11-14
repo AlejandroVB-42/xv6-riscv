@@ -17,7 +17,7 @@
 |---|---|
 | Repositorio oficial | `https://github.com/mit-pdos/xv6-riscv` |
 | Fork del grupo | ⚠️ COMPLETAR |
-| Versión de Linux | ⚠️ COMPLETAR (salida de `cat /etc/os-release` y `uname -r`) |
+| Versión de Linux | Ubuntu 26.04.1 LTS (Resolute Raccoon) sobre WSL2 en Windows; kernel 6.18.58.1-microsoft-standard-WSL2 |
 | Commit de partida | ⚠️ COMPLETAR (salida de `git rev-parse HEAD` y `git log -1 --oneline`) |
 
 Comandos usados:
@@ -39,7 +39,7 @@ sudo apt install git build-essential gdb-multiarch qemu-system-misc \
      gcc-riscv64-linux-gnu binutils-riscv64-linux-gnu
 ```
 
-Versiones usadas (⚠️ COMPLETAR con la salida real):
+Versiones usadas:
 
 ```bash
 riscv64-linux-gnu-gcc --version
@@ -50,10 +50,11 @@ make --version
 
 | Herramienta | Versión |
 |---|---|
-| gcc RISC-V | ⚠️ COMPLETAR |
-| binutils (ld) | ⚠️ COMPLETAR |
-| qemu-system-riscv64 | ⚠️ COMPLETAR |
-| make | ⚠️ COMPLETAR |
+| gcc RISC-V | riscv64-linux-gnu-gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0 |
+| binutils (ld) | GNU ld (GNU Binutils for Ubuntu) 2.46 |
+| qemu-system-riscv64 | QEMU 10.2.1 (Debian 1:10.2.1+ds-1ubuntu3.3) |
+| make | GNU Make 4.4.1 |
+| git | 2.53.0 |
 
 ![Herramientas y versiones](img/herramientas.png)
 *⚠️ COMPLETAR: captura de la terminal con las versiones. Verifiquen que la imagen se vea desde GitHub (carpeta `img/` subida al fork).*
@@ -79,10 +80,11 @@ El `Makefile` define el número de CPUs con la variable `CPUS` (por defecto 3) y
 make qemu CPUS=1
 ```
 
-Evidencia de que hay una sola CPU: ⚠️ COMPLETAR con una de estas opciones:
+Evidencia de que hay una sola CPU:
 
-- En qemu, `Ctrl-a` y luego `c` abre el monitor; el comando `info cpus` debe listar una única CPU.
-- Mostrar en el `Makefile` la línea `CPUS := 3` y la opción `-smp $(CPUS)` junto con la ejecución usando `CPUS=1`.
+- Con `make qemu CPUS=1` el arranque no muestra las líneas `hart 1 starting` ni `hart 2 starting` que sí aparecen con `make qemu` (3 CPUs por defecto).
+- En el monitor de qemu (`Ctrl-a` y luego `c`), el comando `info cpus` lista una única CPU: `* CPU #0: thread_id=... model=rv64`.
+- En el `Makefile` (`grep -n "CPUS" Makefile`): línea 174 `ifndef CPUS`, línea 175 `CPUS := 3` y línea 178 `QEMUOPTS = -machine virt -bios none -kernel $K/kernel -m 128M -smp $(CPUS) -nographic`.
 
 ![Una sola CPU](img/una-cpu.png)
 
@@ -101,11 +103,115 @@ XV6 usa **Round Robin** (turno rotatorio) con quantum fijo igual a un tick de re
 1. El temporizador interrumpe periódicamente y, si hay un proceso de usuario ejecutándose, `usertrap()` llama a `yield()`. Es decir, ningún proceso retiene la CPU más de un tick.
 2. Si se ejecutan varios procesos que consumen CPU a la vez, sus salidas se **intercalan** de forma pareja y ninguno se queda sin ejecutar.
 
-Prueba propuesta (⚠️ COMPLETAR con su programa y su captura): un programa de usuario `rr.c` que hace `fork()` de 3 hijos; cada hijo ejecuta un ciclo largo y cada cierto número de iteraciones imprime su identificador (`A`, `B`, `C`). Con `CPUS=1`, la salida debe mostrar `ABCABC...` (alternancia) y no un hijo completo tras otro. Recuerden que esto no modifica el planificador, solo es un programa de usuario que lo observa (agréguenlo a `UPROGS` del `Makefile`).
+**Prueba realizada.** Se escribió un programa de usuario `user/rr.c` (agregado a `UPROGS` en el `Makefile`) que no modifica el planificador, solo lo observa. El proceso padre crea 3 hijos (A, B y C). Cada hijo repite 20 veces (o las que se pasen como argumento, `rr <n>`): un ciclo de trabajo que consume CPU (`for(volatile int k = 0; k < 10000000; k++);`) y después escribe su letra con `write(1, &names[i], 1)`. El padre espera a los tres con `wait`.
 
-Evidencia complementaria: `Ctrl-p` dentro de XV6 imprime la lista de procesos con su estado (`procdump()` en `kernel/proc.c`).
+Se ejecutó con una sola CPU virtual (`make qemu CPUS=1`) y dentro de XV6 se corrió `rr`. Salida obtenida:
+
+```text
+$ rr
+AAABBBCCCCAAAABBBBCCCAAABBBBCCCCAAAAABBBBCCCCAAABBBBCCCAABCC
+```
 
 ![Alternancia](img/round-robin.png)
+*⚠️ COMPLETAR: captura de esta salida.*
+
+**Lo que se observa:**
+
+1. La salida tiene 60 letras: 20 de A, 20 de B y 20 de C, como se esperaba (3 hijos × 20 repeticiones).
+2. Las letras aparecen en **bloques** de 1 a 5 letras iguales, y los bloques siguen siempre el orden **A → B → C → A → B → C...**, sin invertirse.
+3. Ningún proceso termina completo antes de que los otros hayan avanzado: no se ve `AAAA...BBBB...CCCC...` (que sería ejecución de cada proceso hasta terminar).
+4. Al final (`...AABCC`) los procesos van terminando en distinto momento: A termina primero, luego B y al final C.
+
+**Interpretación.** Cada bloque corresponde a un turno de CPU. Con una sola CPU, el proceso en ejecución es interrumpido por el reloj (`usertrap()`, `trap.c:85-86`), llama a `yield()` (`proc.c:501`) y pasa a `RUNNABLE`; entonces `scheduler()` continúa el recorrido de `proc[]` (`proc.c:445`) y da la CPU al siguiente proceso `RUNNABLE` de la tabla. Como los tres hijos ocupan posiciones consecutivas de la tabla, el orden de los turnos es siempre A, B, C, A, B, C. Esto es Round Robin: turnos rotatorios de igual duración, sin prioridades.
+
+**Resultado distinto de lo esperado (y su análisis).** Antes de ejecutar esperábamos ver las letras alternadas una por una (`ABCABC...`). Lo observado fueron bloques de 3 a 5 letras por turno. Nuestra hipótesis es que una vuelta del ciclo de trabajo (10 millones de iteraciones) dura menos que un tick de reloj (el quantum de XV6), así que cada proceso alcanza a escribir varias letras antes de ser interrumpido; la variación del tamaño de los bloques (3, 4 o 5) se debería a que los ticks no coinciden exactamente con el final de cada iteración. Esta explicación es una hipótesis: no medimos la duración de las iteraciones. Se podría comprobar aumentando el tamaño del ciclo: si cada iteración durara más de un tick, los bloques se acercarían a una letra por turno. En cualquier caso, la conclusión sobre la política no depende del tamaño de los bloques: la rotación ordenada y equitativa entre procesos listos es la señal de Round Robin.
+
+Código del programa usado (`user/rr.c`):
+
+```c
+#include "kernel/types.h"
+#include "kernel/stat.h"
+#include "user/user.h"
+
+int
+main(int argc, char *argv[])
+{
+  char names[3] = {'A', 'B', 'C'};
+  int reps = 20;                    // por defecto 20 repeticiones
+
+  if(argc > 1)
+    reps = atoi(argv[1]);           // opcional: rr <repeticiones>
+
+  for(int i = 0; i < 3; i++){
+    int pid = fork();
+    if(pid < 0){
+      printf("fork failed\n");
+      exit(1);
+    }
+    if(pid == 0){
+      for(int r = 0; r < reps; r++){
+        for(volatile int k = 0; k < 10000000; k++)
+          ;                         // trabajo que consume CPU
+        write(1, &names[i], 1);     // imprime una letra
+      }
+      exit(0);
+    }
+  }
+  for(int i = 0; i < 3; i++)
+    wait(0);
+  write(1, "\n", 1);
+  exit(0);
+}
+```
+
+**Estados de los procesos (`Ctrl-p`).** `Ctrl-p` ejecuta `procdump()` (`kernel/proc.c`) y muestra el pid, el estado y el nombre de cada proceso. Se ejecutó `rr 200 &` (200 repeticiones por hijo, para que dure más) y se pulsó `Ctrl-p` cuatro veces mientras corría. Con `rr` ya terminado solo aparecen `1 sleep init` y `2 sleep sh` (línea base: ambos bloqueados esperando). Con `rr` en ejecución se obtuvo:
+
+```text
+$ rr 200 &
+$ BBBCCCCAAAABBBBCCCC...BBBBC
+1 sleep  init
+2 sleep  sh
+5 runble rr
+4 sleep  rr
+6 runble rr
+7 run    rr
+CCCAAAAABBBB...CCCCAAAA
+1 sleep  init
+2 sleep  sh
+5 run    rr
+4 sleep  rr
+6 runble rr
+7 runble rr
+BBBBBCCCCAAAABBBBCCCCAAAABBBBCCCC
+1 sleep  init
+2 sleep  sh
+5 runble rr
+4 sleep  rr
+6 runble rr
+7 run    rr
+AAAABBBBCCCCAAAABBBBCCCCAAAAB
+1 sleep  init
+2 sleep  sh
+5 runble rr
+4 sleep  rr
+6 run    rr
+7 runble rr
+```
+
+(Las letras son lo que `rr` imprimía entre una pulsación y otra; se abreviaron los tramos largos.)
+
+![procdump](img/procdump.png)
+*⚠️ COMPLETAR: captura de esta salida.*
+
+**Interpretación:**
+
+1. **El pid 4 es el proceso padre de `rr`**: está en `sleep` porque llamó a `wait` y espera a sus hijos (en `kexit`, `wakeup(p->parent)`, `proc.c:353`, lo despertará). Los pids 5, 6 y 7 son los tres hijos A, B y C.
+2. **Con una sola CPU, en cada instantánea hay exactamente un proceso en `run` y los otros dos hijos en `runble`.** Es el modelo `RUNNING`/`RUNNABLE` del planificador: uno usa la CPU y los listos esperan turno.
+3. **El proceso en `run` cambia de una instantánea a otra** (7, 5, 7, 6): la CPU rota entre los listos, no se queda con uno solo.
+4. **Coincide con las letras impresas.** En cada instantánea, la última letra impresa justo antes corresponde al proceso que aparece en `run`: terminó en `C` y corría el pid 7; terminó en `A` y corría el 5; terminó en `C` y corría el 7; terminó en `B` y corría el 6. Esto indica que el pid 5 es A, el 6 es B y el 7 es C (es una deducción por coincidencia, no una lectura directa del programa). Además, el orden A (5) → B (6) → C (7) sigue el orden de pids, coherente con el recorrido ordenado de `proc[]` en `scheduler()` (`proc.c:445`).
+5. **Tamaño del turno estable.** Con la ejecución larga, casi todos los bloques tienen 4 letras (`AAAABBBBCCCC...`). Esto respalda la hipótesis de arriba: el turno dura un tick y en ese tiempo caben unas 4 vueltas del ciclo; las variaciones ocasionales (3, 5) serían ticks que no coinciden con el final de una iteración. Sigue siendo una explicación probable y no una medición.
+
+Estas dos pruebas (salida de `rr` y `Ctrl-p`) sustentan que XV6 usa Round Robin: turnos rotatorios y de duración fija, sin prioridades, entre los procesos `RUNNABLE`.
 
 ### 2.2 Archivo y función de selección
 
@@ -158,7 +264,7 @@ Estados (`kernel/proc.h:79`): `enum procstate { UNUSED, USED, SLEEPING, RUNNABLE
 |---|---|---|
 | Interrupción de reloj (fin del turno) | `usertrap()` en `kernel/trap.c:85-86` y `kerneltrap()` en `kernel/trap.c:157-158` (`which_dev == 2`) → `yield()` en `proc.c:501-508` | `RUNNING → RUNNABLE` (`proc.c:505`) y luego `sched()` (506) |
 | Espera de un evento (por ejemplo `wait`) | `sleep()` en `proc.c:562-572`, tras `sleep_prepare(chan)` (547-556) | `RUNNING → SLEEPING` (568) y luego `sched()` (569) |
-| Terminación | `kexit()` en `proc.c` (⚠️ COMPLETAR línea de inicio con `grep -n "kexit" kernel/proc.c`) | `RUNNING → ZOMBIE` (358) y luego `sched()` (363) |
+| Terminación | `kexit(int status)` en `proc.c:326-365` | `RUNNING → ZOMBIE` (358) y luego `sched()` (363) |
 
 Fragmentos relevantes (`proc.c`):
 
@@ -181,7 +287,18 @@ if (which_dev == 2)                   // trap.c:85  (usertrap)
 
 **Cómo se despierta o se vuelve elegible.** En esta versión `sleep` no recibe el canal como argumento: primero se llama a `sleep_prepare(chan)`, que guarda el canal en `p->chan`, y luego a `sleep()`, que solo pone el proceso en `SLEEPING` si `p->chan` sigue distinto de 0 (`proc.c:567-568`). `wakeup(chan)` (`proc.c:576-595`) recorre `proc[]` y, para cada proceso con `p->chan == chan`, pone `p->chan = 0` y, si estaba `SLEEPING`, lo pasa a `RUNNABLE` (`proc.c:589-590`). Así no se pierde un despertar que llegue antes de que el proceso alcance a dormirse. En `kexit()`, el proceso llama a `wakeup(p->parent)` (`proc.c:353`) para avisar al padre que puede estar en `wait`.
 
-**El temporizador** (`kernel/start.c:54-66`): `timerinit()` habilita la extensión `sstc` (`w_menvcfg(... | MENVCFG_STCE)`, línea 59), permite al modo supervisor usar `time` y `stimecmp` (62) y programa la primera interrupción con `w_stimecmp(r_time() + 1000000)` (65). Cuando `time` alcanza `stimecmp`, llega una interrupción de reloj al kernel, el manejador de interrupciones devuelve `which_dev == 2` y eso provoca el `yield()` de `trap.c`. ⚠️ COMPLETAR: busquen con `grep -n "stimecmp\|clockintr\|devintr\|ticks" kernel/*.c` dónde se **reprograma** la siguiente interrupción y dónde se incrementa `ticks`, y citen esas líneas.
+**El temporizador** (`kernel/start.c:54-66`): `timerinit()` habilita la extensión `sstc` (`w_menvcfg(... | MENVCFG_STCE)`, línea 59), permite al modo supervisor usar `time` y `stimecmp` (62) y programa la primera interrupción con `w_stimecmp(r_time() + 1000000)` (65). Cuando `time` alcanza `stimecmp`, llega una interrupción de reloj al kernel y `devintr()` (`trap.c:188`) llama a `clockintr()` (`trap.c:215`). `devintr()` devuelve 2 para este tipo de interrupción (`which_dev == 2`), y eso provoca el `yield()` de `usertrap()` y `kerneltrap()`. En `clockintr()` (`trap.c:167`) ocurre lo siguiente:
+
+```c
+acquire(&tickslock);      // trap.c:170
+ticks++;                  // trap.c:171
+wakeup(&ticks);           // trap.c:172
+release(&tickslock);      // trap.c:173
+...
+w_stimecmp(r_time() + 1000000);   // trap.c:179  (programa el siguiente tick)
+```
+
+Es decir, cada tick incrementa la variable global `ticks` (protegida por `tickslock`, declarada en `trap.c:9-10`), despierta a los procesos que duermen sobre `&ticks` (por ejemplo, los que llamaron a `sleep(n)`; ver `sys_sleep` en `sysproc.c:71-88`, que usa `sleep_prepare(&ticks)`) y reprograma la siguiente interrupción 1000000 ciclos de `r_time()` más adelante. Ese intervalo es el **quantum de XV6: un tick**.
 
 Resumen del ciclo:
 
@@ -207,7 +324,27 @@ RUNNING  --(kexit → sched)------------------> ZOMBIE
 
 La política está **fija en el código** de `scheduler()`: no hay un selector de algoritmos. Cambiarla implica editar `proc.c`, recompilar y volver a ejecutar.
 
-⚠️ COMPLETAR: pegar la salida de `make clean; make kernel/kernel 2>&1 | tee build.log; grep -n "proc\|swtch\|kernel.ld" build.log` como evidencia de 2.4.
+**Evidencia de la compilación.** Se ejecutó `make clean`, luego `make kernel/kernel 2>&1 | tee build.log` y `grep -n "proc\|swtch\|kernel.ld" build.log`. En `build.log`:
+
+- Línea 11: `proc.c` se compila a `proc.o` con `riscv64-linux-gnu-gcc -Wall -Werror ... -march=rv64gc -mcmodel=medany -ffreestanding -nostdlib ... -c -o kernel/proc.o kernel/proc.c`.
+- Línea 12: `swtch.S` (ensamblador) se compila con `riscv64-linux-gnu-gcc -march=rv64gc -g ... -c -o kernel/swtch.o kernel/swtch.S`.
+- Línea 28: el enlace final:
+
+```text
+riscv64-linux-gnu-ld -z max-page-size=4096 -T kernel/kernel.ld -o kernel/kernel \
+  kernel/entry.o kernel/start.o ... kernel/proc.o kernel/swtch.o ... kernel/trap.o ... kernel/virtio_disk.o
+```
+
+Observaciones:
+
+- `proc.o` y `swtch.o` aparecen entre los objetos que se enlazan en `kernel/kernel`, en el mismo orden que la lista `OBJS` del `Makefile`.
+- El kernel se compila con `-Wall -Werror`: cualquier advertencia del compilador detiene la construcción. Esto es relevante para una futura implementación, porque un cambio en `proc.c` debe compilar sin advertencias.
+- `-ffreestanding -nostdlib` indica que el kernel no usa la biblioteca estándar de C.
+- El enlazador mostró la advertencia `kernel/kernel has a LOAD segment with RWX permissions`. No impidió la construcción y es una advertencia conocida del enlazado con binutils recientes; se registra como resultado observado.
+- Después del enlace, `make` genera `kernel/kernel.asm` (con `objdump -S`) y `kernel/kernel.sym`. En `kernel/kernel.asm` se puede ubicar la función `scheduler` ya compilada, lo que confirma que el código de `proc.c` forma parte del binario final.
+
+![Compilación del kernel](img/compilacion.png)
+*⚠️ COMPLETAR: captura de `grep -n "proc\|swtch\|kernel.ld" build.log` mostrando las líneas 11, 12 y 28.*
 
 ### 2.5 Diferencias de esta versión de XV6 frente a la del libro
 
@@ -332,10 +469,10 @@ Supuesto: una sola CPU (`CPUS=1`), lo que evita estudiar colas por CPU y balance
 | 1 | Agregar a `struct proc` campos para el nivel actual y los ticks consumidos en ese nivel (y, según el diseño, los ticks del turno actual). | `kernel/proc.h` (`struct proc`) | R1, R3, R4: el planificador necesita saber en qué nivel está cada proceso y cuánto ha gastado. Hoy `struct proc` no guarda nada de prioridad ni de tiempo de CPU consumido. Estos campos se protegerían con `p->lock`, siguiendo la convención del archivo. |
 | 2 | Inicializar nivel = más alto y contadores = 0 al crear el proceso. | `kernel/proc.c` (`allocproc`, y por herencia `fork`; `userinit` para el primer proceso) | R3: todo proceso nuevo entra en la cola superior. `allocproc` es el punto común de creación. |
 | 3 | Reemplazar el criterio "primer `RUNNABLE` de la tabla" por "`RUNNABLE` del nivel más alto, con desempate Round Robin dentro del nivel". | `kernel/proc.c` (`scheduler`) | R1 y R2: la política actual trata a todos igual. Se debe decidir si basta con recorrer `proc[]` buscando el mejor nivel (más simple, ver decisión D1) o mantener colas explícitas (más fiel al algoritmo, más estructura y bloqueos). |
-| 4 | Contabilizar el tiempo de CPU del proceso en ejecución en cada tick y decidir si debe ceder la CPU (fin del quantum de su nivel) y si debe bajar de nivel (asignación agotada). | `kernel/trap.c` (`usertrap`, `kerneltrap` y la rutina que atiende el reloj; ⚠️ verificar su nombre) y/o `kernel/proc.c` (`yield`) | R2 y R4: hoy toda interrupción de reloj llama a `yield()` (quantum fijo de 1 tick). Con MLFQ el quantum depende del nivel, así que no todo tick debe terminar en `yield()`, y alguien debe contar. |
+| 4 | Contabilizar el tiempo de CPU del proceso en ejecución en cada tick y decidir si debe ceder la CPU (fin del quantum de su nivel) y si debe bajar de nivel (asignación agotada). | `kernel/trap.c` (`usertrap`, `kerneltrap` y `clockintr`, `trap.c:167`) y/o `kernel/proc.c` (`yield`) | R2 y R4: hoy toda interrupción de reloj llama a `yield()` (quantum fijo de 1 tick). Con MLFQ el quantum depende del nivel, así que no todo tick debe terminar en `yield()`, y alguien debe contar. |
 | 5 | Definir qué ocurre con el nivel y la contabilidad cuando un proceso se bloquea y despierta (E/S). | `kernel/proc.c` (`sleep_prepare`, `sleep`, `wakeup`, líneas 547-595) | R4 revisada: la contabilidad debe seguir sumando aunque el proceso ceda antes del quantum, para impedir que se juegue con el planificador. Hay que decidir si `sleep` y `wakeup` conservan o no los contadores. |
 | 6 | Decidir si un proceso que pasa a `RUNNABLE` con un nivel mayor que el del que corre lo expulsa de inmediato o espera al siguiente tick. | `kernel/proc.c` (`wakeup`, `kfork` o la función de creación que corresponda; ⚠️ verificar nombre) y `kernel/trap.c` | R1 estricta: sin expulsión, un proceso de alta prioridad puede esperar hasta un tick. XV6 hoy solo replanifica en ticks, `sleep`, `exit`. |
-| 7 | Implementar el aumento periódico de prioridad (boost): cada S ticks, poner todos los procesos en el nivel más alto y reiniciar sus contadores. | `kernel/trap.c` (la rutina del reloj de `trap.c`, ⚠️ verificar cuál incrementa `ticks`) con una función auxiliar en `kernel/proc.c`; declararla en `kernel/defs.h` | R5: evita inanición de procesos de baja prioridad y adapta a procesos que cambian de comportamiento. Requiere recorrer `proc[]` adquiriendo cada `p->lock`. |
+| 7 | Implementar el aumento periódico de prioridad (boost): cada S ticks, poner todos los procesos en el nivel más alto y reiniciar sus contadores. | `kernel/trap.c` (`clockintr()`, `trap.c:167`, que ya incrementa `ticks` bajo `tickslock` en las líneas 170-173) con una función auxiliar en `kernel/proc.c`; declararla en `kernel/defs.h` | R5: evita inanición de procesos de baja prioridad y adapta a procesos que cambian de comportamiento. Requiere recorrer `proc[]` adquiriendo cada `p->lock`. |
 | 8 | Proveer observabilidad del nivel de cada proceso (por ejemplo, mostrarlo en `procdump`). | `kernel/proc.c` (`procdump`) | Comprobación futura: sin ver el nivel, solo se puede verificar de forma indirecta. Una syscall nueva (`kernel/syscall.h`, `syscall.c`, `sysproc.c`, `user/usys.pl`, `user/user.h`) sería opcional y debe justificarse. |
 | 9 | **No** hace falta modificar: `kernel/swtch.S`, `kernel/kernel.ld`, la lista `OBJS` del `Makefile` (si no se agregan archivos). | — | El cambio de contexto y el proceso de construcción no dependen de la política. |
 
@@ -346,7 +483,7 @@ Supuesto: una sola CPU (`CPUS=1`), lo que evita estudiar colas por CPU y balance
 | Id | Decisión pendiente | Qué hay que averiguar |
 |---|---|---|
 | D1 | ¿Recorrer `proc[]` en cada decisión o mantener colas (listas enlazadas) por nivel? | Costo para `NPROC = 64`; cómo mantener el orden Round Robin y el desempate; cómo se protegen las listas con los locks (el orden de adquisición de `p->lock` y evitar *deadlock*). |
-| D2 | Valores de los parámetros: número de niveles, quantum por nivel, asignación, S. | Qué valores recomienda OSTEP; relación con el tick de XV6 (`timerinit` en `kernel/start.c:65` programa 1000000 ciclos de `r_time()`; ⚠️ verificar a cuántos ms equivale en qemu). Con quantum de 1 tick, los niveles quizá no se distingan mucho: ¿hay que cambiar el intervalo del reloj? |
+| D2 | Valores de los parámetros: número de niveles, quantum por nivel, asignación, S. | Qué valores recomienda OSTEP; relación con el tick de XV6 (`timerinit` en `kernel/start.c:65` programa 1000000 ciclos de `r_time()`; ⚠️ verificar a cuántos ms equivale en qemu), y `clockintr()` lo reprograma en `trap.c:179`). Con quantum de 1 tick, los niveles quizá no se distingan mucho: ¿hay que cambiar el intervalo del reloj? |
 | D3 | Dónde se contabiliza el tiempo (en `clockintr`, en `usertrap` o en `yield`) y cómo evitar contar dos veces. | Flujo exacto de `trap.c` y qué usa cada ruta (usuario vs. kernel). |
 | D4 | Expulsión inmediata al despertar un proceso de mayor prioridad. | Si es seguro invocar `yield` en esos puntos y cómo interactúa con los locks. |
 | D5 | Tratamiento de `sleep`/`wakeup` frente a la contabilidad (R4 revisada). | Que `wakeup` no reinicie contadores por accidente. |
