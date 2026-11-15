@@ -2,7 +2,7 @@
 
 **Integrantes:**  
 **Leonardo Alexis Rosero Mendez-2518313**  
-**Alejandro Velez Bejarano-**
+**Alejandro Velez Bejarano-2521169**
 
 1\. **Preparar el repositorio y el entorno**
 
